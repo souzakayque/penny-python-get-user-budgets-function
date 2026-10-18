@@ -1,0 +1,78 @@
+name: Terraform Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Configure PyPI
+        run: |
+          pip config set global.index-url https://pypi.org/simple
+
+      - name: Authenticate with AWS Code Artifact
+        run: |
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain pennyutilsdomain --domain-owner 730335418265 --region us-east-2 --query authorizationToken --output text`
+          pip config set global.extra-index-url https://aws:$CODEARTIFACT_AUTH_TOKEN@pennyutilsdomain-730335418265.d.codeartifact.us-east-2.amazonaws.com/pypi/pypi-store/simple/
+
+      - name: Install dependencies for Lambda
+        run: |
+          pip install -r PennyGetUserBudgetsAPILambda/requirements.txt -t PennyGetUserBudgetsAPILambda/
+
+      - name: Zip Lambda function with dependencies
+        run: |
+          cd PennyGetUserBudgetsAPILambda
+          zip -r app.zip .
+
+      - name: Move zipped Lambda function
+        run: |
+          mv PennyGetUserBudgetsAPILambda/app.zip infra/
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Terraform Plan
+        env:
+          TF_LOG: DEBUG
+          TF_LOG_PATH: terraform-debug.log
+        working-directory: ./infra
+        run: terraform plan -target=aws_lambda_function.penny_python_get_user_budgets_function -out=tfplan
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        working-directory: ./infra
+        run: |
+          for i in {1..5}; do
+            terraform apply -auto-approve && break || sleep 10
+          done
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-logs
+          path: terraform-debug.log
